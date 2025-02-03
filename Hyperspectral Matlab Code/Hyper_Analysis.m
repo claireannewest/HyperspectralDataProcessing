@@ -5,7 +5,7 @@ clc
 
 %% initial parameters
 
-fold = '240920/';       % insert search path here
+fold = '250128/';       % insert search path here
 
 backper = 0.1;                 %fraction of spectra to use in background average
 lowercut=50;                   %Pixels to cut from the blue end of spectra
@@ -14,7 +14,7 @@ lower = 0;                    %lower bound for particle identification (controls
 upper = 0.5;                      %upper bound for particle identification (controls how bright of an object is selected)
 nhood = 1;                      %odd number: nhood by nhood pixels binned to make spectra
 rsquarelim = 0.5;
-binfac = 'one';                 %binning factor 'one' 'two' or 'four'
+binfac = 'two';                 %binning factor 'one' 'two' or 'four'
 bf = 2;                         %1,2,4filename2
 
 

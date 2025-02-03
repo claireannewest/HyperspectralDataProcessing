@@ -5,8 +5,8 @@ clc
 %% Parameters
 
 % Specify path to folder with analysis data
-path = '240920/';
-datafile = 'au77_aft_28';
+path = '250128/';
+datafile = 'mg_roi1_4';
 sample = [datafile, 'analysis'];
 % cd(strcat(path));
 
@@ -28,7 +28,7 @@ part_coord_flip = circshift(part_coord,[0,1]);
 % Plot hyperspectral data cube
 figure1 = figure;
 specfin_final = sum(specfin(:,:,100:end),3); % Plot the spectrum image, summing over wavelengths excluding higher energy
-imshow(specfin_final,[0 100])
+imshow(specfin_final)%,[0 100])
 colormap('turbo');
 
 hold all

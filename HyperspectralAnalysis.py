@@ -47,14 +47,15 @@ class HyperspectralAnalysis:
         bot_pix, top_pix, ncol, nrow = pixel_params
         stanim = np.zeros((ncol, nrow, 670))
         for i in range(ncol):
-            stanim[i, :, :] = stan[top_pix - 1:bot_pix, ::2]
-
+            if stan.shape[1] == 1340:
+                stanim[i, :, :] = stan[top_pix - 1:bot_pix, ::2]
+            if stan.shape[1] == 670:
+                stanim[i, :, :] = stan[top_pix - 1:bot_pix, :]
         return stanim
 
-    def calc_background_avg(self, I_raw, percent):
+    def back_global(self, I_raw, percent):
         bkavg = np.zeros((670,))
         numPixelsBack = int(np.ceil(percent * I_raw.shape[0] * I_raw.shape[1]))
-
         I_sumwave = np.sum(I_raw, 2)  # sum all wavelengths
         # Normalize I_sumwave such that it ranges [0,1]
         I_norm = ((I_sumwave - np.min(I_sumwave))
@@ -70,15 +71,26 @@ class HyperspectralAnalysis:
         # Find the average of all the pixels
         bkavg = sum(I_raw[idx_a_cut, idx_b_cut, :]) / numPixelsBack
         bkavg = np.round(bkavg, 5)  # This is to exactly match matlab
-        print(idx_a_cut.shape)
         return bkavg, [idx_a_cut, idx_b_cut]
 
+    def back_local_grid(self, specfin, xi, yi, offset):
+        back_grid = np.zeros((670, 4))
+        back_grid[:, 0] = self.avg3pixels(M=specfin, xi=xi, yi=(yi + offset))
+        back_grid[:, 1] = self.avg3pixels(M=specfin, xi=xi, yi=(yi - offset))
+        back_grid[:, 2] = self.avg3pixels(M=specfin, xi=(xi + offset), yi=yi)
+        back_grid[:, 3] = self.avg3pixels(M=specfin, xi=(xi - offset), yi=yi)
+        whichmin = np.argmin(np.sum(back_grid, axis=0))
+        back_mingrid = back_grid[:, whichmin]
+        return back_grid, whichmin, back_mingrid
+
     def fit_2Dgauss(self, M, a, x0, c1, y0, c2, d):
+        # For fitting local background.
         x, y = M
         return 1E3 * a * np.exp(-((x - x0)**2 / (2 * c1**2) + (y - y0)**2
                                   / (2 * c2**2))) + d * 1E3
 
     def fitNP_eachwave(self, specfin, waveidx, xi, yi):
+        # For fitting local background.
         # Find the background at a given wavelength
         specfin_wind = specfin[xi - 10: xi + 10, yi - 10: yi + 10, waveidx]
         xran = np.linspace(0, specfin_wind.shape[0] - 1, specfin_wind.shape[0])
@@ -88,7 +100,7 @@ class HyperspectralAnalysis:
         Z = specfin_wind.ravel()
         p0 = [1., 10., 0.86, 10., 1., 2.]
         bounds = [[0, 0, 0, 0, 0, 0],
-                    [1000, 1000, 1000, 1000, 1000, 1000]]
+                  [1000, 1000, 1000, 1000, 1000, 1000]]
         popt, pcov = curve_fit(self.fit_2Dgauss, xdata, Z, p0, bounds=bounds)
         fitdata = self.fit_2Dgauss(xdata, *popt).reshape(len(yran), len(xran))
         return specfin_wind, fitdata, popt
@@ -101,12 +113,12 @@ class HyperspectralAnalysis:
                              numWaves,
                              wavei,
                              wavef):
+        # For fitting local background
         # At some wavelengths, we cannot fit a background.
         # In this case, the code just grabs the previously defined background.
         # I'll silence the error messages that arise.
         import warnings
         warnings.simplefilter("ignore")
-
         for npi in range(numPart):
             xi = int(positions[npi, 0]) - 1
             yi = int(positions[npi, 1]) - 1
@@ -116,11 +128,11 @@ class HyperspectralAnalysis:
                                                      waveidx=(wi + wavei),
                                                      xi=xi,
                                                      yi=yi)
-                    # print(popt)
+                    background[npi, wi] = np.round(popt[-1] * 1E3, 1)
                 except RuntimeError:
-                    pass
-
-                background[npi, wi] = np.round(popt[-1] * 1E3, 1)
+                    bk_global, _ = self.back_global(I_raw=inten_raw,
+                                                    percent=0.1)
+                    background[npi, wi] = bk_global[wi + wavei]
         return background
 
     def calc_DFS(self, inten_raw, wc_minus_dc, back):
@@ -140,24 +152,47 @@ class HyperspectralAnalysis:
                            yi,
                            wavei,
                            wavef):
-        inten_norm_avg3 = self.avg3pixels(M=(inten_raw / wc_minus_dc),
-                                          xi=xi,
-                                          yi=yi,
-                                          )
-        # total = self.calc_DFS(inten_raw=inten_norm_avg3[wavei:wavef],
-        #                       wc_minus_dc=wc_minus_dc[xi, yi, wavei:wavef],
-        #                       back=(9 * background[npi, :]))
-        total = np.round(inten_norm_avg3[wavei:wavef]- 9*background[npi, :] / wc_minus_dc[xi, yi, wavei:wavef], 5)
-
+        dfs_avg3 = self.avg3pixels(M=(inten_raw / wc_minus_dc),
+                                   xi=xi,
+                                   yi=yi,
+                                   )
+        total = np.round(dfs_avg3[wavei:wavef] - 9 * background[npi, :]
+                         / wc_minus_dc[xi, yi, wavei:wavef], 5)
         return total
+
+    def calc_DFS_localgrid(self,
+                           specfin,
+                           numPart,
+                           positions,
+                           wavei,
+                           wavef,
+                           wc_minus_dc,
+                           offset,
+                           ):
+        total = np.zeros((wavef - wavei, numPart))
+        for npi in range(numPart):
+            xi = int(positions[npi, 0]) - 1
+            yi = int(positions[npi, 1]) - 1
+            _, _, back_mingrid = self.back_local_grid(specfin,
+                                                      xi,
+                                                      yi,
+                                                      offset)
+            dfs_avg3 = self.avg3pixels(M=(specfin / wc_minus_dc),
+                                       xi=xi,
+                                       yi=yi,
+                                       )
+            total[:, npi] = (dfs_avg3[wavei:wavef] - back_mingrid[wavei:wavef]
+                             / wc_minus_dc[xi, yi, wavei:wavef])
+        return np.round(total, 5)
 
     def lorentz(self, wave_eV, A, Gam_eV, wave0_eV):
         return A * 0.5 * Gam_eV / ((wave_eV - wave0_eV)**2 + (0.5 * Gam_eV)**2)
 
     def fit_spectrum(self, wave, inten):
         popt, pcov = curve_fit(self.lorentz, wave, inten,
-                               p0=[100, 200, 770])
+                               p0=[50, 150, 700],
+                               # bounds=[[.1, 100, 600],
+                               #         [100, 350, 800]]
+                               )
         fit = self.lorentz(wave, *popt)
         return fit, popt
-
-
