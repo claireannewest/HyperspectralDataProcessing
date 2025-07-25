@@ -1,5 +1,6 @@
 import numpy as np
 from scipy.optimize import curve_fit
+from nptdms import TdmsFile
 
 
 class HyperspectralAnalysis:
@@ -101,8 +102,14 @@ class HyperspectralAnalysis:
         p0 = [1., 10., 0.86, 10., 1., 2.]
         bounds = [[0, 0, 0, 0, 0, 0],
                   [1000, 1000, 1000, 1000, 1000, 1000]]
-        popt, pcov = curve_fit(self.fit_2Dgauss, xdata, Z, p0, bounds=bounds)
-        fitdata = self.fit_2Dgauss(xdata, *popt).reshape(len(yran), len(xran))
+        try:
+            popt, pcov = curve_fit(self.fit_2Dgauss,
+                                   xdata, Z, p0, bounds=bounds)
+            fitdata = self.fit_2Dgauss(xdata, *popt).reshape(len(yran),
+                                                             len(xran))
+        except (ValueError, RuntimeError):
+            fitdata = []
+            popt = []
         return specfin_wind, fitdata, popt
 
     def fit_all_NPs_eachwave(self,
@@ -120,19 +127,25 @@ class HyperspectralAnalysis:
         import warnings
         warnings.simplefilter("ignore")
         for npi in range(numPart):
-            xi = int(positions[npi, 0]) - 1
-            yi = int(positions[npi, 1]) - 1
+            countfits = np.zeros(numWaves)
+            xi = int(positions[npi, 1])
+            yi = int(positions[npi, 2])
             for wi in range(numWaves):
-                try:
-                    _, _, popt = self.fitNP_eachwave(specfin=inten_raw,
-                                                     waveidx=(wi + wavei),
-                                                     xi=xi,
-                                                     yi=yi)
-                    background[npi, wi] = np.round(popt[-1] * 1E3, 1)
-                except RuntimeError:
+                _, fitdata, popt = self.fitNP_eachwave(specfin=inten_raw,
+                                                       waveidx=(wi + wavei),
+                                                       xi=xi,
+                                                       yi=yi)
+                if fitdata == []:
                     bk_global, _ = self.back_global(I_raw=inten_raw,
                                                     percent=0.1)
                     background[npi, wi] = bk_global[wi + wavei]
+                else:
+                    background[npi, wi] = np.round(popt[-1] * 1E3, 1)
+                    countfits[wi] = 1
+            countwaves = (str('NP ') + str(npi) + str(': fit ')
+                          + str(int(np.sum(countfits) / numWaves * 100))
+                          + str('% of wavelengths'))
+            print(countwaves)
         return background
 
     def calc_DFS(self, inten_raw, wc_minus_dc, back):
@@ -171,12 +184,12 @@ class HyperspectralAnalysis:
                            ):
         total = np.zeros((wavef - wavei, numPart))
         for npi in range(numPart):
-            xi = int(positions[npi, 0]) - 1
-            yi = int(positions[npi, 1]) - 1
-            _, _, back_mingrid = self.back_local_grid(specfin,
-                                                      xi,
-                                                      yi,
-                                                      offset)
+            xi = int(positions[npi, 1])
+            yi = int(positions[npi, 2])
+            _, _, back_mingrid = self.back_local_grid(specfin=specfin,
+                                                      xi=xi,
+                                                      yi=yi,
+                                                      offset=offset)
             dfs_avg3 = self.avg3pixels(M=(specfin / wc_minus_dc),
                                        xi=xi,
                                        yi=yi,
@@ -189,10 +202,58 @@ class HyperspectralAnalysis:
         return A * 0.5 * Gam_eV / ((wave_eV - wave0_eV)**2 + (0.5 * Gam_eV)**2)
 
     def fit_spectrum(self, wave, inten):
-        popt, pcov = curve_fit(self.lorentz, wave, inten,
-                               p0=[50, 150, 700],
-                               # bounds=[[.1, 100, 600],
-                               #         [100, 350, 800]]
+        A_ran = [1E-3, 5]
+        Gam_ran = [0.1, 2]
+        wave0_ran = [1, 3]
+        energy = 1240 / wave
+        popt, pcov = curve_fit(self.lorentz, energy, inten,
+                               p0=[0.5, 0.5, 1.7],
+                               bounds=[[A_ran[0], Gam_ran[0], wave0_ran[0]],
+                                       [A_ran[1], Gam_ran[1], wave0_ran[1]]]
                                )
-        fit = self.lorentz(wave, *popt)
+        if popt[0] in A_ran or popt[1] in Gam_ran or popt[2] in wave0_ran:
+            print('Error with Lorentzian fit.')
+        fit = self.lorentz(energy, *popt)
         return fit, popt
+
+    def process_data(self, path_int, pathdc, pathbc, path_positions):
+        pxl, wave, inten = self.read_tdms(tdms_file=TdmsFile.read(path_int),
+                                          datalen=670)
+        _, w1, dc_raw = self.read_tdms(tdms_file=TdmsFile.read(pathdc),
+                                       datalen=1340)
+        _, w2, bc_raw = self.read_tdms(tdms_file=TdmsFile.read(pathbc),
+                                       datalen=1340)
+        wc_minus_dc = self.process_wcdc(dc_raw=dc_raw,
+                                        bc_raw=bc_raw,
+                                        pixel_params=pxl)
+        positions = np.loadtxt(path_positions)
+        numPart = len(positions)
+        return numPart, positions, wave, inten, wc_minus_dc
+
+    def calc_all_DFS(self,
+                     wave_raw,
+                     inten_raw,
+                     numPart,
+                     positions,
+                     wc_minus_dc):
+        wavei = 0  # index of starting wavelength
+        wavef = 670  # index of end wavelength
+        wave = wave_raw[wavei:wavef]
+        gam_tot = np.zeros(numPart)
+        eres_tot = np.zeros(numPart)
+        # fit_tot = np.zeros((wavef - wavei, numPart))
+        fit_tot = np.zeros((670, numPart))
+
+        dfs_tot = self.calc_DFS_localgrid(specfin=inten_raw,
+                                          numPart=numPart,
+                                          positions=positions,
+                                          wavei=wavei,
+                                          wavef=wavef,
+                                          wc_minus_dc=wc_minus_dc,
+                                          offset=4)
+        for npi in range(0, numPart):
+            DFSi = dfs_tot[:, npi]
+            fit_tot[:, npi], popt = self.fit_spectrum(wave, DFSi)
+            gam_tot[npi] = 1240 * popt[1] / popt[2]**2
+            eres_tot[npi] = 1240 / popt[2]
+        return wave, dfs_tot, fit_tot, gam_tot, eres_tot
